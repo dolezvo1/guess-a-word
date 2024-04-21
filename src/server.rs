@@ -43,7 +43,7 @@ static ACCEPTED_OPTIONS: [&str; 3] = [
 async fn main() -> std::io::Result<()> {
     
     let args: Vec<_> = env::args().collect();
-    let (tx, receiver) = mpsc::channel::<(Box<dyn ProtocolReader<Ptcl> + Send + Unpin>,
+    let (tx, receiver) = mpsc::channel::<(Box<dyn ProtocolReader<Ptcl> + Send>,
                                           Box<dyn ProtocolWriter<Ptcl> + Send>)>();
     let (tx_tcp, tx_unix_socket) = (tx.clone(), tx);
     
@@ -105,112 +105,136 @@ async fn main() -> std::io::Result<()> {
         if let Ok(client) = receiver.recv() {
             let (password, store) = (password.clone(), store.clone());
             tokio::spawn(async move {
-                handle_new_client(client, password, store);
+                
+                // Establish joint message channel
+                let (tx, joint_rx) = mpsc::channel::<IMsg<Ptcl>>();
+                
+                if let Ok(mut sw) = ServerWorker::new(&client, password, store, tx.clone()) {
+                    // Add network listener to the joint channel
+                    let _ = spawn_network_listener(client.0, tx.clone());
+                    
+                    // "At this moment, the server answers to any requests the client sends to the server. For unknown requests, the server must respond as well, such that client can identify it as an error."
+                    while let Ok(msg) = joint_rx.recv() {
+                        if sw.handle_message(msg, &client.1).is_err() {
+                            break;
+                        }
+                    }
+                }
             });
         }
     }
 }
 
-fn handle_new_client<R,W>(
-    (client_r, client_w): (Box<R>, Box<W>),
-    password: String,
-    store: Store
-)
-    where R: ProtocolReader<Ptcl> + Send + ?Sized + 'static,
-          W: ProtocolWriter<Ptcl> + Send + ?Sized
-{
-    // "Upon connection - the server must send a message to the client - initiating the communication. Client upon receiving it - answers to the server with a password."
-    let _ = client_w.write(&Ptcl::ServerHello);
-    match client_r.read() {
-        Ok(Ptcl::ClientPassword(p)) if p == password => {},
-        _ => return,
+struct ServerWorker {
+    store: Store,
+    id: String,
+    client_state: ClientState,
+    tx: Sender<IMsg<Ptcl>>,
+    tx_to_opponent: Option<Sender<IMsg<Ptcl>>>,
+    opponent_word: Option<String>,
+}
+
+impl ServerWorker {
+    fn new<'a,R,W>(
+        (client_r, client_w): &'a (Box<R>, Box<W>),
+        password: String,
+        store: Store,
+        tx: Sender<IMsg<Ptcl>>,
+    ) -> Result<Self, ()>
+        where R: ProtocolReader<Ptcl> + ?Sized,
+              W: ProtocolWriter<Ptcl> + ?Sized
+    {
+        // "Upon connection - the server must send a message to the client - initiating the communication. Client upon receiving it - answers to the server with a password."
+        let _ = client_w.write(&Ptcl::ServerHello);
+        match client_r.read() {
+            Ok(Ptcl::ClientPassword(p)) if p == password => {},
+            _ => return Err(()),
+        }
+        
+        // "This initial exchange then ends with server either disconnecting the client (wrong password) or assigning the client an ID and sending the ID back to the client."
+        let id = {
+            let mut lock = store.write().unwrap();
+            let id = lock.id_generator;
+            lock.id_generator += 1;
+            let id = id.to_string();
+            lock.available_clients.insert(id.clone(), (ClientState::Free, tx.clone()));
+            id
+        };
+        let _ = client_w.write(&Ptcl::ConnectionEstablished(id.clone()));
+        
+        Ok(Self{store, id, tx, client_state: ClientState::Free,
+                tx_to_opponent: None, opponent_word: None})
     }
     
-    // "This initial exchange then ends with server either disconnecting the client (wrong password) or assigning the client an ID and sending the ID back to the client."
-    let (tx, joint_rx) = mpsc::channel::<IMsg<Ptcl>>();
-    let assigned_id = {
-        let mut lock = store.write().unwrap();
-        let new_id = lock.id_generator;
-        lock.id_generator += 1;
-        let new_id = new_id.to_string();
-        lock.available_clients.insert(new_id.clone(), (ClientState::Free, tx.clone()));
-        new_id
-    };
-    let _ = client_w.write(&Ptcl::ConnectionEstablished(assigned_id.clone()));
-    
-    // Add network listener to the joint channel
-    let _ = spawn_network_listener(client_r, tx.clone());
-    
-    // "At this moment, the server answers to any requests the client sends to the server. For unknown requests, the server must respond as well, such that client can identify it as an error."
-    let mut client_state = ClientState::Free;
-    let mut tx_to_opponent: Option<Sender<IMsg<Ptcl>>> = None;
-    let mut opponent_word = None;
-    
-    macro_rules! clean_client_state { () => {
-        client_state = ClientState::Free;
-        tx_to_opponent = None;
-        opponent_word = None;
-        let mut lock = store.write().unwrap();
-        lock.available_clients.get_mut(&assigned_id).map(|e| e.0 = ClientState::Free);
-    }}
-    
-    while let Ok(msg) = joint_rx.recv() {
+    fn handle_message<'a, W>(
+        &mut self,
+        msg: IMsg<Ptcl>,
+        client_w: &'a Box<W>,
+    ) -> Result<(),()>
+        where W: ProtocolWriter<Ptcl> + ?Sized
+    {
         match msg {
             // Client was likely disconnected, therefore terminate
             IMsg::Error => {
-                if let Some(tx) = tx_to_opponent {
+                if let Some(tx) = &self.tx_to_opponent {
                     let _ = tx.send(IMsg::OpponentDisconnected);
                 }
-                break
+                return Err(());
             },
             IMsg::OpponentDisconnected => {
                 let _ = client_w.write(&Ptcl::ServerOpponentDisconnected);
-                clean_client_state!();
+                self.reset_state();
             }
             // Client got connected as a guesser
-            IMsg::OpponentAssigned(tx, id, w) if client_state == ClientState::Free => {
-                client_state = ClientState::Guesser;
-                tx_to_opponent = Some(tx);
-                opponent_word = Some(w);
+            IMsg::OpponentAssigned(tx, id, w) if self.client_state == ClientState::Free => {
+                self.client_state = ClientState::Guesser;
+                self.tx_to_opponent = Some(tx);
+                self.opponent_word = Some(w);
                 let _ = client_w.write(&Ptcl::OpponentConnectionEstablished(
                                                 id.clone(), ClientState::Guesser));
             },
             IMsg::WordFound => {
                 let _ = client_w.write(&Ptcl::ServerWordFound);
-                clean_client_state!();
+                self.reset_state();
             },
-            // Resend messages by channel to client
-            IMsg::Internal(msg) => {
+            // Resend messages from opponent to client
+            IMsg::Opponent(msg) => {
                 let _ = client_w.write(&msg);
             },
-            // Process messages from client
-            IMsg::Network(msg) => match (&client_state, msg) {
+            // Invalid message was read, inform client
+            IMsg::Network(Err(_)) => {
+                let _ = client_w.write(&Ptcl::UnrecognizedMessageError);
+            },
+            // Process valid messages from client
+            IMsg::Network(Ok(msg)) => match (&self.client_state, msg) {
                 (_, Ptcl::ClientListOpponents) => {
-                    let lock = store.read().unwrap();
+                    let lock = self.store.read().unwrap();
                     let _ = client_w.write(&Ptcl::ServerOpponentList(
                         lock.available_clients.iter()
                             .filter_map(|(k,v)|
-                                if *k != assigned_id && v.0 == ClientState::Free {
+                                if *k != self.id && v.0 == ClientState::Free {
                                     Some(k.to_string())
                                 } else {None}).collect::<Vec<String>>()));
                 },
                 (_, Ptcl::ClientSelectOpponent(oid, word)) => {
-                    let mut lock = store.write().unwrap();
+                    let mut lock = self.store.write().unwrap();
                     
                     match lock.available_clients.get_mut(&oid)
                                         .filter(|e| e.0 == ClientState::Free) {
-                        Some(ol) if oid != assigned_id => {
+                        Some(ol) if oid != self.id => {
                             ol.0 = ClientState::Guesser;
-                            let _ = ol.1.send(IMsg::OpponentAssigned(tx.clone(),
-                                                        assigned_id.clone(), word.clone()));
-                            tx_to_opponent = Some(ol.1.clone());
-                            client_state = ClientState::Riddlemaker(word);
-                            if let Some(me) = lock.available_clients.get_mut(&assigned_id) {
-                                me.0 = client_state.clone();
+                            let _ = ol.1.send(IMsg::OpponentAssigned(
+                                                        self.tx.clone(),
+                                                        self.id.clone(),
+                                                        word.clone()));
+                            self.tx_to_opponent = Some(ol.1.clone());
+                            self.client_state = ClientState::Riddlemaker(word);
+                            if let Some(me) = lock.available_clients.get_mut(&self.id) {
+                                me.0 = self.client_state.clone();
                             };
                             let _ = client_w.write(&Ptcl::OpponentConnectionEstablished(
                                                                 oid.clone(),
-                                                                client_state.clone()));
+                                                                self.client_state.clone()));
                         },
                         _ => {
                             let _ = client_w.write(
@@ -218,42 +242,49 @@ fn handle_new_client<R,W>(
                         }
                     }
                 },
-                
                 (ClientState::Guesser, Ptcl::ClientGuess(word)) => {
-                    if let Some(tx) = &tx_to_opponent {
-                        match &opponent_word {
+                    if let Some(tx) = &self.tx_to_opponent {
+                        match &self.opponent_word {
                             Some(w) if *w == word => {
                                 let _ = tx.send(IMsg::WordFound);
                                 let _ = client_w.write(&Ptcl::ServerWordFound);
-                                clean_client_state!();
+                                self.reset_state();
                             },
                             _ => {
-                                let _ = tx.send(IMsg::Internal(Ptcl::ClientGuess(word)));
+                                let _ = tx.send(IMsg::Opponent(Ptcl::ClientGuess(word)));
                             },
                         }
                     }
                 }
                 (ClientState::Riddlemaker(_), Ptcl::ClientHint(word)) => {
-                    if let Some(tx) = &tx_to_opponent {
-                        let _ = tx.send(IMsg::Internal(Ptcl::ClientHint(word)));
+                    if let Some(tx) = &self.tx_to_opponent {
+                        let _ = tx.send(IMsg::Opponent(Ptcl::ClientHint(word)));
                     }
                 },
-                (_, Ptcl::ClientGuess(_) | Ptcl::ClientHint(_)) => {
-                    // Logic error: Messages were sent by the wrong client
-                    let _ = client_w.write(&Ptcl::LogicError);
-                },
-                
+                // Logic error: message was valid, but not currently expected
+                //   e.g.: Riddlemaker sending a Guess message, or player requesting a new connection while in a game, etc.
                 _ => {
-                    let _ = client_w.write(&Ptcl::UnrecognizedMessageError);
+                    let _ = client_w.write(&Ptcl::LogicError);
                 },
             },
             _ => {},
         }
+        Ok(())
     }
+    /// State reset, such as when a game was won or forfeited
+    fn reset_state(&mut self) {
+        self.client_state = ClientState::Free;
+        self.tx_to_opponent = None;
+        self.opponent_word = None;
+        let mut lock = self.store.write().unwrap();
+        lock.available_clients.get_mut(&self.id).map(|e| e.0 = ClientState::Free);
+    }
+}
 
+impl Drop for ServerWorker {
     // Connection lost: clean up
-    {
-        let mut lock = store.write().unwrap();
-        let _ = lock.available_clients.remove(&assigned_id);
+    fn drop(&mut self) {
+        let mut lock = self.store.write().unwrap();
+        let _ = lock.available_clients.remove(&self.id);
     }
 }

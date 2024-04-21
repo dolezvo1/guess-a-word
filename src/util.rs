@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use serde::{Serialize, Deserialize};
 use std::sync::mpsc::Sender;
 use tokio::task::{spawn_blocking, JoinHandle};
+use bincode::ErrorKind;
 
 /// Find named argument, parse it to T
 pub fn parse_arg<T: std::str::FromStr>(
@@ -21,6 +22,7 @@ pub fn parse_arg<T: std::str::FromStr>(
     None
 }
 
+/// Client may either be Free (not in a game), or 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ClientState {
     Free,
@@ -28,9 +30,10 @@ pub enum ClientState {
     Guesser,
 }
 
+/// Internal message type - type of messages flowing between threads on one machine
 pub enum InternalMessage<T> {
-    Network(T),
-    Internal(T),
+    Network(Result<T,()>),
+    Opponent(T),
     OpponentAssigned(/*tx: */Sender<InternalMessage<T>>, /*id:*/String, /*word: */String),
     WordFound,
     OpponentDisconnected,
@@ -38,7 +41,7 @@ pub enum InternalMessage<T> {
     Error,
 }
 
-// Protocol of the game
+/// Protocol of the game - type of messages flowing between machines
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum GuessProtocol {
     // "Upon connection - the server must send a message to the client - initiating the communication. Client upon receiving it - answers to the server with a password."
@@ -50,7 +53,7 @@ pub enum GuessProtocol {
     // 1. Client A requests a list of possible opponents (IDs)
     ClientListOpponents,
     // 2. Server responds with a list of possible opponents (IDs)
-    ServerOpponentList(Vec<String>),
+    ServerOpponentList(/*opponents_ids:*/Vec<String>),
     // 3. Client A requests a match with opponent (ID), specifying a word to guess
     ClientSelectOpponent(/*id: */String, /*word: */String),
     // 4. Server either confirms this or rejects with an error code
@@ -74,12 +77,12 @@ pub enum GuessProtocol {
 pub trait ProtocolReader<T>
     where T: for<'a> Deserialize<'a>
 {
-    fn read(&self) -> Result<T, ()>;
+    fn read(&self) -> Result<T, Box<ErrorKind>>;
 }
 pub trait ProtocolWriter<T>
     where T: Serialize
 {
-    fn write(&self, element: &T) -> Result<(), ()>;
+    fn write(&self, element: &T) -> Result<(), Box<ErrorKind>>;
 }
 
 // Implement traits above for any object that is Read and/or Write
@@ -88,19 +91,22 @@ pub trait ProtocolWriter<T>
 impl<T, U> ProtocolReader<T> for U
     where T: for<'a> Deserialize<'a> + std::fmt::Debug, for<'a> &'a U: Read
 {
-    fn read(&self) -> Result<T, ()> {
-        bincode::deserialize_from(self).map_err(|_|())
+    fn read(&self) -> Result<T, Box<ErrorKind>> {
+        bincode::deserialize_from(self)
     }
 }
 impl<T, U> ProtocolWriter<T> for U
     where T: Serialize + std::fmt::Debug, for<'a> &'a U: Write
 {
-    fn write(&self, element: &T) -> Result<(), ()> {
-        bincode::serialize_into(self, element).map_err(|_|())
+    fn write(&self, element: &T) -> Result<(), Box<ErrorKind>> {
+        bincode::serialize_into(self, element)
     }
 }
 
-// As stated above
+/// Spawn a task to block on network reader
+/// Sends InternalMessage::Network(Ok(a)) when message is read,
+///       InternalMessage::Network(Err(())) when message deserialization fails,
+///   and InternalMessage::Error on unrecoverable error (such as lost connection).
 pub fn spawn_network_listener<R, T>(
     reader: Box<R>,
     transmitter: Sender<InternalMessage<T>>,
@@ -111,11 +117,16 @@ pub fn spawn_network_listener<R, T>(
     spawn_blocking(move || { loop {
         match reader.read() {
             Ok(a) => {
-                transmitter.send(InternalMessage::Network(a)).unwrap();
+                transmitter.send(InternalMessage::Network(Ok(a))).unwrap();
             },
-            Err(_) => {
-                transmitter.send(InternalMessage::Error).unwrap();
-                break;
+            Err(e) => match *e {
+                ErrorKind::Io(_) => {
+                    transmitter.send(InternalMessage::Error).unwrap();
+                    break;
+                },
+                _ => {
+                    transmitter.send(InternalMessage::Network(Err(()))).unwrap();
+                },
             }
         }
     }})

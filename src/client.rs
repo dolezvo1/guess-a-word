@@ -105,8 +105,12 @@ fn comm<R, W>((server_r, server_w): (Box<R>, Box<W>)) -> Result<(), &'static str
                 println!("connection to server was lost");
                 break
             },
-            // Handle network messages
-            IMsg::Network(msg) => match (msg, &opponent_id) {
+            // Invalid message was read, inform server?
+            IMsg::Network(Err(_)) => {
+                let _ = server_w.write(&Ptcl::UnrecognizedMessageError);
+            },
+            // Handle valid messages from server
+            IMsg::Network(Ok(msg)) => match (msg, &opponent_id) {
                 (Ptcl::ServerOpponentList(opponent_list), None) => {
                     if !opponent_list.is_empty() {
                         println!("Available opponents ({}):", opponent_list.len());
