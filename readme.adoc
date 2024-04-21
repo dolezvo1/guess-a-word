@@ -1,0 +1,46 @@
+
+= Guess a word
+
+Implementation of "Guess a word" client and server in Rust.
+
+== Known issues
+
+* Current implementation is not very testable, move to better one pending
+
+== Setup
+
+. Get Cargo
+. Run command below according to whether you want to run the server or a client.
+
+== Executables
+
+=== Server
+
+The server executable accepts connections from clients and facilitates their games with each other.
+
+Possible arguments:
+
+* `--server-password` (mandatory, e.g. `password`)
+* `--tcp-port` (optional, default value `7777`)
+* `--unix-socket-path` (optional, default value `guessaword` footnote:unixonly[Only available on Unix systems.])
+
+Example:
+
+----
+cargo run --release --bin server -- --server-password aaaaaaa
+----
+
+=== Client
+
+Client allows user to connect to the server and play a game with another user connected to the same server.
+
+Possible arguments:
+
+* `--tcp-address` (mandatory group footnote:destination[Exactly one target destination must be selected.])
+* `--unix-socket-path` (mandatory group footnote:unixonly[] footnote:destination[])
+
+Example: 
+
+----
+cargo run --release --bin client -- --tcp-address 127.0.0.1:7777
+----
