@@ -15,7 +15,7 @@ pub fn parse_arg<T: std::str::FromStr>(
     while let Some(value) = it.next() {
         if value == name {
             return it.next().and_then(|e| e.parse::<T>().ok());
-        } else if let Some(_) = options.iter().find(|e| *e == value) {
+        } else if options.iter().any(|e| *e == value) {
             it.nth(1);
         }
     }

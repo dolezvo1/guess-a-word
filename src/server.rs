@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::net::TcpListener;
-use std::sync::{Arc, mpsc, mpsc::Sender, RwLock};
+use std::sync::{Arc, mpsc, RwLock};
 
 #[cfg(target_family="unix")]
 use std::os::unix::net::UnixListener;
@@ -15,21 +15,10 @@ use crate::util::{
     spawn_network_listener,
 };
 
-/*
-fn main() {
-    // The object that we will serialize.
-    let target: Option<String>  = Some("hello world".to_string());
-
-    //let encoded: Vec<u8> = bincode::serialize(&target).unwrap();
-    let decoded: Option<String> = bincode::deserialize(&encoded[..]).unwrap();
-    assert_eq!(target, decoded);
-    println!("{:?}", encoded);
-}
-*/
-
+type Sender = mpsc::Sender<IMsg<Ptcl>>;
 struct ServerState {
     id_generator: usize,
-    available_clients: HashMap<String, (ClientState, Sender<IMsg<Ptcl>>)>,
+    available_clients: HashMap<String, (ClientState, Sender)>,
 }
 type Store = Arc<RwLock<ServerState>>;
 
@@ -109,13 +98,15 @@ async fn main() -> std::io::Result<()> {
                 // Establish joint message channel
                 let (tx, joint_rx) = mpsc::channel::<IMsg<Ptcl>>();
                 
-                if let Ok(mut sw) = ServerWorker::new(&client, password, store, tx.clone()) {
+                if let Ok(mut sw) = ServerWorker::new(
+                                            (&*client.0, &*client.1),
+                                            password, store, tx.clone()) {
                     // Add network listener to the joint channel
                     let _ = spawn_network_listener(client.0, tx.clone());
                     
                     // "At this moment, the server answers to any requests the client sends to the server. For unknown requests, the server must respond as well, such that client can identify it as an error."
                     while let Ok(msg) = joint_rx.recv() {
-                        if sw.handle_message(msg, &client.1).is_err() {
+                        if sw.handle_message(msg, &*client.1).is_err() {
                             break;
                         }
                     }
@@ -129,17 +120,17 @@ struct ServerWorker {
     store: Store,
     id: String,
     client_state: ClientState,
-    tx: Sender<IMsg<Ptcl>>,
-    tx_to_opponent: Option<Sender<IMsg<Ptcl>>>,
+    tx: Sender,
+    tx_to_opponent: Option<Sender>,
     opponent_word: Option<String>,
 }
 
 impl ServerWorker {
-    fn new<'a,R,W>(
-        (client_r, client_w): &'a (Box<R>, Box<W>),
+    fn new<R,W>(
+        (client_r, client_w): (&R, &W),
         password: String,
         store: Store,
-        tx: Sender<IMsg<Ptcl>>,
+        tx: Sender,
     ) -> Result<Self, ()>
         where R: ProtocolReader<Ptcl> + ?Sized,
               W: ProtocolWriter<Ptcl> + ?Sized
@@ -166,10 +157,10 @@ impl ServerWorker {
                 tx_to_opponent: None, opponent_word: None})
     }
     
-    fn handle_message<'a, W>(
+    fn handle_message<W>(
         &mut self,
         msg: IMsg<Ptcl>,
-        client_w: &'a Box<W>,
+        client_w: &W,
     ) -> Result<(),()>
         where W: ProtocolWriter<Ptcl> + ?Sized
     {
@@ -277,7 +268,9 @@ impl ServerWorker {
         self.tx_to_opponent = None;
         self.opponent_word = None;
         let mut lock = self.store.write().unwrap();
-        lock.available_clients.get_mut(&self.id).map(|e| e.0 = ClientState::Free);
+        if let Some(e) = lock.available_clients.get_mut(&self.id) {
+            e.0 = ClientState::Free;
+        }
     }
 }
 
