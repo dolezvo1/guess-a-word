@@ -1,8 +1,6 @@
 
 use std::io::{Read, Write};
 use serde::{Serialize, Deserialize};
-use std::sync::mpsc::Sender;
-use tokio::task::{spawn_blocking, JoinHandle};
 use bincode::ErrorKind;
 
 /// Find named argument, parse it to T
@@ -30,16 +28,37 @@ pub enum ClientState {
     Guesser,
 }
 
-/// Internal message type - type of messages flowing between threads on one machine
-pub enum InternalMessage<T> {
-    Network(Result<T,()>),
-    Opponent(T),
-    OpponentAssigned(/*tx: */Sender<InternalMessage<T>>, /*id:*/String, /*word: */String),
-    WordFound,
-    OpponentDisconnected,
-    StdIn(String),
-    Error,
+/// Spawn a task to block on network reader read
+/// Sends Self::Network(Ok(a)) when message is read,
+///       Self::Network(Err(())) when message deserialization fails,
+///   and Self::Error on unrecoverable error (such as lost connection).
+macro_rules! impl_spawn_network_listener {($vis: vis) => {
+$vis fn spawn_network_listener<R>(
+    reader: Box<R>,
+    transmitter: Sender<Self>,
+) -> JoinHandle<()>
+    where R: ProtocolReader<T> + Send + ?Sized + 'static,
+          T: for<'a> Deserialize<'a> + Send + 'static
+{
+    spawn_blocking(move || { loop {
+        match reader.read() {
+            Ok(a) => {
+                transmitter.send(Self::Network(Ok(a))).unwrap();
+            },
+            Err(e) => match *e {
+                ErrorKind::Io(_) => {
+                    transmitter.send(Self::Error).unwrap();
+                    break;
+                },
+                _ => {
+                    transmitter.send(Self::Network(Err(()))).unwrap();
+                },
+            }
+        }
+    }})
 }
+}}
+pub(crate) use impl_spawn_network_listener;
 
 /// Protocol of the game - type of messages flowing between machines
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -101,33 +120,4 @@ impl<T, U> ProtocolWriter<T> for U
     fn write(&self, element: &T) -> Result<(), Box<ErrorKind>> {
         bincode::serialize_into(self, element)
     }
-}
-
-/// Spawn a task to block on network reader
-/// Sends InternalMessage::Network(Ok(a)) when message is read,
-///       InternalMessage::Network(Err(())) when message deserialization fails,
-///   and InternalMessage::Error on unrecoverable error (such as lost connection).
-pub fn spawn_network_listener<R, T>(
-    reader: Box<R>,
-    transmitter: Sender<InternalMessage<T>>,
-) -> JoinHandle<()>
-    where R: ProtocolReader<T> + Send + ?Sized + 'static,
-          T: for<'a> Deserialize<'a> + Send + 'static
-{
-    spawn_blocking(move || { loop {
-        match reader.read() {
-            Ok(a) => {
-                transmitter.send(InternalMessage::Network(Ok(a))).unwrap();
-            },
-            Err(e) => match *e {
-                ErrorKind::Io(_) => {
-                    transmitter.send(InternalMessage::Error).unwrap();
-                    break;
-                },
-                _ => {
-                    transmitter.send(InternalMessage::Network(Err(()))).unwrap();
-                },
-            }
-        }
-    }})
 }

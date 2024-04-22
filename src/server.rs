@@ -8,12 +8,14 @@ use std::sync::{Arc, mpsc, RwLock};
 use std::os::unix::net::UnixListener;
 
 mod util;
+mod server_util;
+
 use crate::util::{
     parse_arg,
-    ClientState, InternalMessage as IMsg, GuessProtocol as Ptcl,
+    ClientState, GuessProtocol as Ptcl,
     ProtocolReader, ProtocolWriter,
-    spawn_network_listener,
 };
+use crate::server_util::{ServerInternalMessage as IMsg};
 
 type Sender = mpsc::Sender<IMsg<Ptcl>>;
 struct ServerState {
@@ -34,6 +36,7 @@ async fn main() -> std::io::Result<()> {
     let args: Vec<_> = env::args().collect();
     let (tx, receiver) = mpsc::channel::<(Box<dyn ProtocolReader<Ptcl> + Send>,
                                           Box<dyn ProtocolWriter<Ptcl> + Send>)>();
+    #[cfg_attr(not(target_family="unix"), allow(unused_variables))]
     let (tx_tcp, tx_unix_socket) = (tx.clone(), tx);
     
     let password = parse_arg::<String>("--server-password", &args, &ACCEPTED_OPTIONS)
@@ -98,11 +101,12 @@ async fn main() -> std::io::Result<()> {
                 // Establish joint message channel
                 let (tx, joint_rx) = mpsc::channel::<IMsg<Ptcl>>();
                 
+                // Establish connection to client
                 if let Ok(mut sw) = ServerWorker::new(
                                             (&*client.0, &*client.1),
                                             password, store, tx.clone()) {
                     // Add network listener to the joint channel
-                    let _ = spawn_network_listener(client.0, tx.clone());
+                    let _ = IMsg::<Ptcl>::spawn_network_listener(client.0, tx.clone());
                     
                     // "At this moment, the server answers to any requests the client sends to the server. For unknown requests, the server must respond as well, such that client can identify it as an error."
                     while let Ok(msg) = joint_rx.recv() {
@@ -116,12 +120,19 @@ async fn main() -> std::io::Result<()> {
     }
 }
 
+/// Server-side representation of a client.
 struct ServerWorker {
+    /// Reference to the server storage
     store: Store,
+    /// Client id
     id: String,
+    /// Client game state
     client_state: ClientState,
+    /// Transmitter for the joint channel of the client
     tx: Sender,
+    /// Transmitter for the joint channel of the opponent
     tx_to_opponent: Option<Sender>,
+    /// Opponent word
     opponent_word: Option<String>,
 }
 
