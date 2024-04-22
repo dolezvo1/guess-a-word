@@ -1,9 +1,7 @@
 
 use std::io::Write;
-use crate::util::{
-    ClientState, GuessProtocol as Ptcl,
-    ProtocolReader, ProtocolWriter,
-};
+
+use crate::protocol::{ClientState, GuessProtocol as Ptcl, ProtocolReader, ProtocolWriter};
 use crate::client_util::{prompted_input, ClientInternalMessage as IMsg};
 
 /// Client-side representation of client state

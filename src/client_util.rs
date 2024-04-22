@@ -4,7 +4,8 @@ use serde::Deserialize;
 use tokio::task::{spawn_blocking, JoinHandle};
 use bincode::ErrorKind;
 
-use crate::util::{impl_spawn_network_listener, ProtocolReader};
+use crate::protocol::ProtocolReader;
+use crate::util::{impl_spawn_network_listener};
 
 /// Internal message type - type of messages flowing between threads on client machine
 pub enum ClientInternalMessage<T> {

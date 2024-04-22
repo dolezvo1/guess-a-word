@@ -3,10 +3,6 @@
 
 Implementation of "Guess a word" client and server in Rust.
 
-== Known issues
-
-* Current implementation is not very testable, move to better one pending
-
 == Setup
 
 . Get Cargo
@@ -43,4 +39,12 @@ Example:
 
 ----
 cargo run --release --bin client -- --tcp-address 127.0.0.1:7777
+----
+
+=== Tests
+
+To run tests, run the following command:
+
+----
+cargo test
 ----

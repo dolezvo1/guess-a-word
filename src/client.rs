@@ -4,13 +4,14 @@ use std::net::TcpStream;
 use std::net::SocketAddr;
 use std::sync::mpsc;
 
-
+mod protocol;
 mod client_worker;
 mod util;
 mod client_util;
 
+use crate::protocol::{GuessProtocol as Ptcl, ProtocolReader, ProtocolWriter};
 use crate::client_worker::ClientWorker;
-use crate::util::{parse_arg, GuessProtocol as Ptcl, ProtocolReader, ProtocolWriter};
+use crate::util::{parse_arg};
 use crate::client_util::{spawn_stdin_listener, ClientInternalMessage as IMsg};
 
 
