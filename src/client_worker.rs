@@ -14,7 +14,7 @@ pub struct ClientWorker {
 impl ClientWorker {
     /// Create new connection to server, establish communication
     pub fn new<R,W>(
-        (server_r, server_w): (&R, &W),
+        (server_r, server_w): (&mut R, &mut W),
     ) -> Result<Self, &'static str>
         where R: ProtocolReader<Ptcl> + ?Sized,
               W: ProtocolWriter<Ptcl> + ?Sized
@@ -42,7 +42,7 @@ impl ClientWorker {
     pub fn handle_message<W>(
         &mut self,
         msg: IMsg<Ptcl>,
-        server_w: &W,
+        server_w: &mut W,
     ) -> Result<(), &'static str>
         where W: ProtocolWriter<Ptcl> + ?Sized
     {

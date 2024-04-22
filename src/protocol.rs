@@ -47,28 +47,30 @@ pub enum GuessProtocol {
 pub trait ProtocolReader<T>
     where T: for<'a> Deserialize<'a>
 {
-    fn read(&self) -> Result<T, Box<ErrorKind>>;
+    fn read(&mut self) -> Result<T, Box<ErrorKind>>;
 }
 pub trait ProtocolWriter<T>
     where T: Serialize
 {
-    fn write(&self, element: &T) -> Result<(), Box<ErrorKind>>;
+    fn write(&mut self, element: &T) -> Result<(), Box<ErrorKind>>;
 }
 
 // Implement traits above for any object that is Read and/or Write
 // Beware, the provided operations are blocking only as long as the underlying structs are.
 // For non-blocking operations use a separate thread and a channel.
 impl<T, U> ProtocolReader<T> for U
-    where T: for<'a> Deserialize<'a> + std::fmt::Debug, for<'a> &'a U: Read
+    where T: for<'a> Deserialize<'a> + std::fmt::Debug,
+          U: Read + ?Sized
 {
-    fn read(&self) -> Result<T, Box<ErrorKind>> {
+    fn read(&mut self) -> Result<T, Box<ErrorKind>> {
         bincode::deserialize_from(self)
     }
 }
 impl<T, U> ProtocolWriter<T> for U
-    where T: Serialize + std::fmt::Debug, for<'a> &'a U: Write
+    where T: Serialize + std::fmt::Debug,
+          U: Write + ?Sized
 {
-    fn write(&self, element: &T) -> Result<(), Box<ErrorKind>> {
+    fn write(&mut self, element: &T) -> Result<(), Box<ErrorKind>> {
         bincode::serialize_into(self, element)
     }
 }

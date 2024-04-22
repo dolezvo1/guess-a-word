@@ -94,7 +94,7 @@ async fn main() -> std::io::Result<()> {
     
     // Start a task for each connection received through channel
     loop {
-        if let Ok(client) = receiver.recv() {
+        if let Ok(mut client) = receiver.recv() {
             let (password, store) = (password.clone(), store.clone());
             tokio::spawn(async move {
                 
@@ -103,14 +103,14 @@ async fn main() -> std::io::Result<()> {
                 
                 // Establish connection to client
                 if let Ok(mut sw) = ServerWorker::new(
-                                            (&*client.0, &*client.1),
+                                            (client.0.as_mut(), client.1.as_mut()),
                                             password, store, tx.clone()) {
                     // Add network listener to the joint channel
                     let _ = IMsg::<Ptcl>::spawn_network_listener(client.0, tx.clone());
                     
                     // "At this moment, the server answers to any requests the client sends to the server. For unknown requests, the server must respond as well, such that client can identify it as an error."
                     while let Ok(msg) = joint_rx.recv() {
-                        if sw.handle_message(msg, &*client.1).is_err() {
+                        if sw.handle_message(msg, client.1.as_mut()).is_err() {
                             break;
                         }
                     }

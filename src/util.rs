@@ -22,14 +22,14 @@ pub fn parse_arg<T: std::str::FromStr>(
 ///   and Self::Error on unrecoverable error (such as lost connection).
 macro_rules! impl_spawn_network_listener {($vis: vis) => {
 $vis fn spawn_network_listener<R>(
-    reader: Box<R>,
+    mut reader: Box<R>,
     transmitter: Sender<Self>,
 ) -> JoinHandle<()>
     where R: ProtocolReader<T> + Send + ?Sized + 'static,
           T: for<'a> Deserialize<'a> + Send + 'static
 {
     spawn_blocking(move || { loop {
-        match reader.read() {
+        match reader.as_mut().read() {
             Ok(a) => {
                 transmitter.send(Self::Network(Ok(a))).unwrap();
             },
@@ -69,13 +69,13 @@ mod tests {
     }
     
     #[test]
-    fn test_doesnt_find_missing() {
+    fn test_parse_arg_doesnt_find_missing() {
         assert_eq!(parse_arg::<String>("--searched-option", &arg_set_1(), &empty()),
                    None);
     }
     
     #[test]
-    fn test_finds_only() {
+    fn test_parse_arg_finds_only() {
         let args = vec!["--received-option".to_string(), "value".to_string()];
         
         assert_eq!(parse_arg::<String>("--received-option", &args, &empty()),
@@ -83,25 +83,25 @@ mod tests {
     }
     
     #[test]
-    fn test_finds_first() {
+    fn test_parse_arg_finds_first() {
         assert_eq!(parse_arg::<String>("--received-option", &arg_set_1(), &empty()),
                    Some("value1".to_string()));
     }
     
     #[test]
-    fn test_finds_mid() {
+    fn test_parse_arg_finds_mid() {
         assert_eq!(parse_arg::<String>("--different-received-option", &arg_set_1(), &empty()),
                    Some("value2".to_string()));
     }
     
     #[test]
-    fn test_finds_last() {
+    fn test_parse_arg_finds_last() {
         assert_eq!(parse_arg::<String>("--last-received-option", &arg_set_1(), &empty()),
                    Some("value3".to_string()));
     }
     
     #[test]
-    fn test_finds_tricky() {
+    fn test_parse_arg_finds_tricky() {
         assert_eq!(parse_arg::<String>("--different-received-option",
                                        &arg_set_2(), &accepted_options()),
                    Some("value2".to_string()));

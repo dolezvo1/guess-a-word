@@ -11,7 +11,7 @@ mod client_util;
 
 use crate::protocol::{GuessProtocol as Ptcl, ProtocolReader, ProtocolWriter};
 use crate::client_worker::ClientWorker;
-use crate::util::{parse_arg};
+use crate::util::parse_arg;
 use crate::client_util::{spawn_stdin_listener, ClientInternalMessage as IMsg};
 
 
@@ -67,14 +67,14 @@ async fn main() {
     }
 }
 
-fn comm<R, W>((server_r, server_w): (Box<R>, Box<W>)) -> Result<(), &'static str>
+fn comm<R, W>((mut server_r, mut server_w): (Box<R>, Box<W>)) -> Result<(), &'static str>
     where R: ProtocolReader<Ptcl> + Send + 'static,
           W: ProtocolWriter<Ptcl> + Send
 {
     // Establish joint message channel
     let (tx, joint_rx) = mpsc::channel::<IMsg<Ptcl>>();
     
-    let mut cw = ClientWorker::new((&*server_r, &*server_w))?;
+    let mut cw = ClientWorker::new((server_r.as_mut(), server_w.as_mut()))?;
     
     println!("You were assigned ID {}", cw.id());
     println!("Available commands:\n\tlist - List available opponents\n\tconnect ID WORD - Connect to an opponent");
@@ -85,7 +85,7 @@ fn comm<R, W>((server_r, server_w): (Box<R>, Box<W>)) -> Result<(), &'static str
     
     // Handle all messages in the joint channel until error
     while let Ok(msg) = joint_rx.recv() {
-        cw.handle_message(msg, &*server_w)?
+        cw.handle_message(msg, server_w.as_mut())?
     }
     unreachable!();
 }
