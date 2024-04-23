@@ -47,26 +47,34 @@ async fn main() -> std::io::Result<()> {
             available_clients: HashMap::new(),
         }));
     
+    let (tcp_port, unix_socket_path)
+        = (parse_arg::<u16>("--tcp-port", &args, &ACCEPTED_OPTIONS),
+           parse_arg::<String>("--unix-socket-path", &args, &ACCEPTED_OPTIONS));
+    if tcp_port == None && unix_socket_path == None {
+        eprintln!("At least one listener option must be provided (`--tcp-port PORT`, `--unix-socket-path PATH`)");
+        return Err(std::io::Error::other("invalid arguments"));
+    }
+    
     // Create TCP listener thread
-    let tcp_port = parse_arg("--tcp-port", &args, &ACCEPTED_OPTIONS).unwrap_or(7777);
-    tokio::spawn(async move {
-        let tcp_listener = match TcpListener::bind(("127.0.0.1", tcp_port)) {
-            Ok(tcp_listener) => tcp_listener,
-            _ => { return; }
-        };
-        
-        for stream in tcp_listener.incoming() {
-            let _ = stream.map(|stream| stream.try_clone().map(|clone| {
-                let _ = tx_tcp.send((Box::new(stream), Box::new(clone)));
-            }));
-        }
-        unreachable!();
-    });
+    if let Some(tcp_port) = tcp_port {
+        tokio::spawn(async move {
+            let tcp_listener = match TcpListener::bind(("127.0.0.1", tcp_port)) {
+                Ok(tcp_listener) => tcp_listener,
+                _ => { return; }
+            };
+            
+            for stream in tcp_listener.incoming() {
+                let _ = stream.map(|stream| stream.try_clone().map(|clone| {
+                    let _ = tx_tcp.send((Box::new(stream), Box::new(clone)));
+                }));
+            }
+            unreachable!();
+        });
+    }
     
     // Create Unix socket listener
-    #[cfg(target_family="unix")] {
-        let unix_socket_path = parse_arg("--unix-socket-path", &args, &ACCEPTED_OPTIONS)
-                                    .unwrap_or_else(|| "guessaword".to_string());
+    #[cfg(target_family="unix")]
+    if let Some(unix_socket_path) = unix_socket_path {
         tokio::spawn(async move {
             // Clean up the socket if it already exists
             if std::fs::metadata(unix_socket_path).is_ok() {

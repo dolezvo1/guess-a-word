@@ -17,13 +17,13 @@ The server executable accepts connections from clients and facilitates their gam
 Possible arguments:
 
 * `--server-password` (mandatory, e.g. `password`)
-* `--tcp-port` (optional, default value `7777`)
-* `--unix-socket-path` (optional, default value `guessaword` footnote:unixonly[Only available on Unix systems.])
+* `--tcp-port` (mandatory group footnote:listener[At least one listener must be selected.])
+* `--unix-socket-path` (mandatory group footnote:listener[At least one listener must be selected.] footnote:unixonly[Only available on Unix systems.])
 
 Example:
 
 ----
-cargo run --release --bin server -- --server-password aaaaaaa
+cargo run --release --bin server -- --server-password aaaaaaa --tcp-port 7777
 ----
 
 === Client
