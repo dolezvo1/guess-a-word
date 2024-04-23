@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use serde::{Serialize, Deserialize};
 use bincode::ErrorKind;
 
-/// Client may either be Free (not in a game), or 
+/// Client may either be Free (not in a game), or in one of the role states
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ClientState {
     Free,

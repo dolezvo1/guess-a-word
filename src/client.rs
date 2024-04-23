@@ -26,7 +26,7 @@ async fn main() {
     
     let result = match (parse_arg::<String>("--tcp-address", &args, &ACCEPTED_OPTIONS),
            parse_arg::<String>("--unix-socket-path", &args, &ACCEPTED_OPTIONS)) {
-        // Both or neither destinations provided, return with 1
+        // Both or neither destinations provided, return with error
         (Some(_), Some(_)) | (None, None) => {
             Err("Exactly one destination must be provided (`--tcp-address ADDRESS:PORT` or `--unix-socket-path PATH`, not both).")
         },
@@ -67,6 +67,7 @@ async fn main() {
     }
 }
 
+// Communicate with server using provided streams
 fn comm<R, W>((mut server_r, mut server_w): (Box<R>, Box<W>)) -> Result<(), &'static str>
     where R: ProtocolReader<Ptcl> + Send + 'static,
           W: ProtocolWriter<Ptcl> + Send
