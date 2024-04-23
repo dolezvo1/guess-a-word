@@ -101,7 +101,7 @@ impl ServerWorker {
                                     Some(k.to_string())
                                 } else {None}).collect::<Vec<String>>()));
                 },
-                (_, Ptcl::ClientSelectOpponent(oid, word)) => {
+                (ClientState::Free, Ptcl::ClientSelectOpponent(oid, word)) => {
                     let mut lock = self.store.write().unwrap();
                     
                     match lock.available_clients.get_mut(&oid)
@@ -140,7 +140,7 @@ impl ServerWorker {
                             },
                         }
                     }
-                }
+                },
                 (ClientState::Riddlemaker(_), Ptcl::ClientHint(word)) => {
                     if let Some(tx) = &self.tx_to_opponent {
                         let _ = tx.send(IMsg::Opponent(Ptcl::ClientHint(word)));
@@ -180,251 +180,603 @@ impl Drop for ServerWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{mpsc, Arc, RwLock};
+    use std::sync::{mpsc, mpsc::Receiver, Arc, RwLock};
     use std::collections::{HashMap, VecDeque};
     use crate::ServerState;
     
-    fn empty_store() -> Store {
-        Arc::new(RwLock::new(
-            ServerState {
-                id_generator: 7,
-                available_clients: HashMap::new(),
-        }))
+    struct ServerWorkerMockContext {
+        worker: Result<ServerWorker, ()>,
+        worker_rx: Receiver<IMsg<Ptcl>>,
+        client_r: Box<VecDeque<u8>>,
+        client_w: Box<VecDeque<u8>>,
     }
     
-    fn client_rw() -> (Box<VecDeque<u8>>, Box<VecDeque<u8>>) {
-        (Box::new(VecDeque::<u8>::new()), Box::new(VecDeque::<u8>::new()))
+    // Create empty store and initialize some number of workers
+    macro_rules! initialize {($password: expr, $start_id: expr, $passwords: expr) => {{
+        let store = Arc::new(RwLock::new(
+            ServerState {
+                id_generator: $start_id,
+                available_clients: HashMap::new(),
+        }));
+        let mut workers = Vec::new();
+        for p in $passwords {
+            let (mut client_r, mut client_w) = (Box::new(VecDeque::<u8>::new()),
+                                                Box::new(VecDeque::<u8>::new()));
+            let (worker_tx, worker_rx) = mpsc::channel::<IMsg<Ptcl>>();
+            let _ = client_r.as_mut().write(&Ptcl::ClientPassword(p.to_string()));
+            
+            let worker = ServerWorker::new((client_r.as_mut(), client_w.as_mut()),
+                                           $password.to_string(),
+                                           store.clone(), worker_tx.clone());
+            
+            workers.push(
+                ServerWorkerMockContext {worker, worker_rx, client_r, client_w}
+            );
+        }
+        (store, workers)
+    }}}
+    
+    macro_rules! drain_queues {($w: expr) => {{
+        let mut ret = Vec::new();
+        for e in $w {
+            let mut cw = Vec::new();
+            while !e.client_w.is_empty() {
+                cw.push(e.client_w.as_mut().read().unwrap());
+            }
+            ret.push(cw);
+        }
+        ret
+    }}}
+    
+    macro_rules! assert_queues_empty {($w: expr) => {
+        for e in $w {
+            assert!(e.client_r.is_empty());
+            assert!(e.client_w.is_empty());
+            assert!(e.worker_rx.try_recv().is_err());
+        }
+    }}
+    
+    fn assert_workers_eq(w: &Vec<ServerWorkerMockContext>,
+                         e: Vec<Result<(&str, ClientState, Option<String>), ()>>) {
+        assert_eq!(w.len(), e.len());
+        for (w, e) in std::iter::zip(w, e) {
+            match (&w.worker, e) {
+                (Ok(w), Ok((id, state, oword))) => {
+                    assert_eq!(w.id, id.to_string());
+                    assert_eq!(w.client_state, state);
+                    assert_eq!(w.opponent_word, oword);
+                },
+                (Err(_), Err(_)) => { assert!(true); },
+                _ => { assert!(false); },
+            }
+        }
     }
+    
+    fn assert_store_eq(s: Store, e: (usize, Vec<(&str, ClientState)>)){
+        let lock = s.read().unwrap();
+        assert_eq!(lock.id_generator, e.0);
+        assert_eq!(lock.available_clients.len(), e.1.len());
+        
+        for (k, s) in e.1 {
+            assert_eq!(lock.available_clients.get(k).unwrap().0, s);
+        }
+    }
+    
+    macro_rules! handle_msg {($wc: expr, $msg: expr) => {{
+        let wc = $wc;
+        match &mut wc.worker {
+            Ok(w) => w.handle_message($msg, wc.client_w.as_mut()),
+            _ => panic!(),
+        }
+    }}}
     
     #[test]
     fn test_can_establish_communication() {
-        // Prepare
-        let store = empty_store();
-        let (mut client_r, mut client_w) = client_rw();
-        let (tx, rx) = mpsc::channel::<IMsg<Ptcl>>();
-        let _ = client_r.as_mut().write(&Ptcl::ClientPassword("password".to_string()));
-        
         // Execute
-        let worker = ServerWorker::new((client_r.as_mut(), client_w.as_mut()),
-                                           "password".to_string(),
-                                           store.clone(), tx).unwrap();
+        let (store, mut workers) = initialize!("password", 7, vec!["password"]);
         
-        // Empty communication queues
-        let hello: Ptcl = client_w.as_mut().read().unwrap();
-        let connection_established: Ptcl = client_w.as_mut().read().unwrap();
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
         
         // Test
-        assert!(client_r.is_empty());
-        assert!(client_w.is_empty());
-        assert!(rx.try_recv().is_err());
-        assert_eq!(hello, Ptcl::ServerHello);
-        assert_eq!(connection_established, Ptcl::ConnectionEstablished("7".to_string()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string())]]);
         
-        assert_eq!(worker.id, "7".to_string());
-        assert_eq!(worker.client_state, ClientState::Free);
-        assert_eq!(worker.opponent_word, None);
-        
-        let lock = store.read().unwrap();
-        assert_eq!(lock.id_generator, 8);
-        assert_eq!(lock.available_clients.len(), 1);
-        assert_eq!(lock.available_clients["7"].0, ClientState::Free);
+        assert_workers_eq(&workers, vec![Ok(("7", ClientState::Free, None))]);
+        assert_store_eq(store, (8, vec![("7", ClientState::Free)]));
     }
     
     #[test]
     fn test_rejects_invalid_password() {
-        // Prepare
-        let store = empty_store();
-        let (mut client_r, mut client_w) = client_rw();
-        let (tx, rx) = mpsc::channel::<IMsg<Ptcl>>();
-        let _ = client_r.as_mut().write(&Ptcl::ClientPassword("not_password".to_string()));
-        
         // Execute
-        let worker = ServerWorker::new((client_r.as_mut(), client_w.as_mut()),
-                                           "password".to_string(),
-                                           store.clone(), tx);
+        let (store, mut workers) = initialize!("password", 7, vec!["not_password"]);
         
-        // Empty communication queues
-        let hello: Ptcl = client_w.as_mut().read().unwrap();
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
         
         // Test
-        assert!(client_r.is_empty());
-        assert!(client_w.is_empty());
-        assert!(rx.try_recv().is_err());
-        assert_eq!(hello, Ptcl::ServerHello);
-        assert!(worker.is_err());
-        
-        let lock = store.read().unwrap();
-        assert_eq!(lock.id_generator, 7);
-        assert_eq!(lock.available_clients.len(), 0);
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello]]);
+        assert_workers_eq(&workers, vec![Err(())]);
+        assert_store_eq(store, (7, vec![]));
     }
     
-    // TODO: test can handle user disconnection
+    #[test]
+    fn test_can_handle_disconnection() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password"]);
+        
+        // Execute (replacing worker will drop it, removing it from store)
+        workers[0].worker = Err(());
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string())]]);
+        assert_workers_eq(&workers, vec![Err(())]);
+        assert_store_eq(store, (8, vec![]));
+    }
     
     #[test]
     fn test_rejects_connection_nonexistent() {
         // Prepare
-        let store = empty_store();
-        let (mut client_r, mut client_w) = client_rw();
-        let (tx, rx) = mpsc::channel::<IMsg<Ptcl>>();
-        let _ = client_r.as_mut().write(&Ptcl::ClientPassword("password".to_string()));
-        let mut worker = ServerWorker::new((client_r.as_mut(), client_w.as_mut()),
-                                           "password".to_string(),
-                                           store.clone(), tx).unwrap();
+        let (store, mut workers) = initialize!("password", 7, vec!["password"]);
         
         // Execute
-        let r = worker.handle_message(IMsg::Network(Ok(
-                                        Ptcl::ClientSelectOpponent("404".to_string(),
-                                                                   "missing".to_string()))),
-                              client_w.as_mut());
+        let r = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                    Ptcl::ClientSelectOpponent("404".to_string(),
+                                                               "missing".to_string()))));
         
-        // Empty communication queues
-        let hello: Ptcl = client_w.as_mut().read().unwrap();
-        let connection_established: Ptcl = client_w.as_mut().read().unwrap();
-        let opponent_not_established: Ptcl = client_w.as_mut().read().unwrap();
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
         
         // Test
         assert_eq!(r, Ok(()));
-        assert!(client_r.is_empty());
-        assert!(client_w.is_empty());
-        assert!(rx.try_recv().is_err());
-        assert_eq!(hello, Ptcl::ServerHello);
-        assert_eq!(connection_established,
-                   Ptcl::ConnectionEstablished("7".to_string()));
-        assert_eq!(opponent_not_established,
-                   Ptcl::OpponentConnectionNotEstablished("404".to_string()));
-        
-        assert_eq!(worker.id, "7".to_string());
-        assert_eq!(worker.client_state, ClientState::Free);
-        assert_eq!(worker.opponent_word, None);
-        
-        let lock = store.read().unwrap();
-        assert_eq!(lock.id_generator, 8);
-        assert_eq!(lock.available_clients.len(), 1);
-        assert_eq!(lock.available_clients["7"].0, ClientState::Free);
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionNotEstablished("404".to_string())]]);
+        assert_workers_eq(&workers, vec![Ok(("7", ClientState::Free, None))]);
+        assert_store_eq(store, (8, vec![("7", ClientState::Free)]));
     }
+    
     
     #[test]
     fn test_rejects_connection_self() {
         // Prepare
-        let store = empty_store();
-        let (mut client_r, mut client_w) = client_rw();
-        let (tx, rx) = mpsc::channel::<IMsg<Ptcl>>();
-        let _ = client_r.as_mut().write(&Ptcl::ClientPassword("password".to_string()));
-        let mut worker = ServerWorker::new((client_r.as_mut(), client_w.as_mut()),
-                                           "password".to_string(),
-                                           store.clone(), tx).unwrap();
+        let (store, mut workers) = initialize!("password", 7, vec!["password"]);
         
         // Execute
-        let r = worker.handle_message(IMsg::Network(Ok(
+        let r = handle_msg!(&mut workers[0], IMsg::Network(Ok(
                                         Ptcl::ClientSelectOpponent("7".to_string(),
-                                                                   "self".to_string()))),
-                              client_w.as_mut());
+                                                                   "self".to_string()))));
         
-        // Empty communication queues
-        let hello: Ptcl = client_w.as_mut().read().unwrap();
-        let connection_established: Ptcl = client_w.as_mut().read().unwrap();
-        let opponent_not_established: Ptcl = client_w.as_mut().read().unwrap();
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
         
         // Test
         assert_eq!(r, Ok(()));
-        assert!(client_r.is_empty());
-        assert!(client_w.is_empty());
-        assert!(rx.try_recv().is_err());
-        assert_eq!(hello, Ptcl::ServerHello);
-        assert_eq!(connection_established,
-                   Ptcl::ConnectionEstablished("7".to_string()));
-        assert_eq!(opponent_not_established,
-                   Ptcl::OpponentConnectionNotEstablished("7".to_string()));
-        
-        assert_eq!(worker.id, "7".to_string());
-        assert_eq!(worker.client_state, ClientState::Free);
-        assert_eq!(worker.opponent_word, None);
-        
-        let lock = store.read().unwrap();
-        assert_eq!(lock.id_generator, 8);
-        assert_eq!(lock.available_clients.len(), 1);
-        assert_eq!(lock.available_clients["7"].0, ClientState::Free);
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionNotEstablished("7".to_string())]]);
+        assert_workers_eq(&workers, vec![Ok(("7", ClientState::Free, None))]);
+        assert_store_eq(store, (8, vec![("7", ClientState::Free)]));
     }
     
     #[test]
     fn test_allows_game_start() {
         // Prepare
-        let store = empty_store();
-        let (mut client1_r, mut client1_w) = client_rw();
-        let (mut client2_r, mut client2_w) = client_rw();
-        let (tx1, rx1) = mpsc::channel::<IMsg<Ptcl>>();
-        let (tx2, rx2) = mpsc::channel::<IMsg<Ptcl>>();
-        let _ = client1_r.as_mut().write(&Ptcl::ClientPassword("password".to_string()));
-        let _ = client2_r.as_mut().write(&Ptcl::ClientPassword("password".to_string()));
-        let mut worker1 = ServerWorker::new((client1_r.as_mut(), client1_w.as_mut()),
-                                           "password".to_string(),
-                                           store.clone(), tx1).unwrap();
-        let mut worker2 = ServerWorker::new((client2_r.as_mut(), client2_w.as_mut()),
-                                           "password".to_string(),
-                                           store.clone(), tx2).unwrap();
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password"]);
         
         // Execute
-        let r1 = worker1.handle_message(IMsg::Network(Ok(
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
                                         Ptcl::ClientSelectOpponent("8".to_string(),
-                                                                   "valid".to_string()))),
-                              client1_w.as_mut());
-        let r2 = worker2.handle_message(rx2.recv().unwrap(), client2_w.as_mut());
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
         
-        // Empty communication queues
-        let hello1: Ptcl = client1_w.as_mut().read().unwrap();
-        let connection_established1: Ptcl = client1_w.as_mut().read().unwrap();
-        let opponent_established1: Ptcl = client1_w.as_mut().read().unwrap();
-        let hello2: Ptcl = client2_w.as_mut().read().unwrap();
-        let connection_established2: Ptcl = client2_w.as_mut().read().unwrap();
-        let opponent_established2: Ptcl = client2_w.as_mut().read().unwrap();
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
         
         // Test
         let state1 = ClientState::Riddlemaker("valid".to_string());
         let state2 = ClientState::Guesser;
         assert_eq!(r1, Ok(()));
         assert_eq!(r2, Ok(()));
-        assert!(client1_r.is_empty());
-        assert!(client1_w.is_empty());
-        assert!(client2_r.is_empty());
-        assert!(client2_w.is_empty());
-        assert!(rx1.try_recv().is_err());
-        assert!(rx2.try_recv().is_err());
-        assert_eq!(hello1, Ptcl::ServerHello);
-        assert_eq!(connection_established1,
-                   Ptcl::ConnectionEstablished("7".to_string()));
-        assert_eq!(opponent_established1,
-                   Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone()));
-        assert_eq!(hello2, Ptcl::ServerHello);
-        assert_eq!(connection_established2,
-                   Ptcl::ConnectionEstablished("8".to_string()));
-        assert_eq!(opponent_established2,
-                   Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone()));
-        
-        assert_eq!(worker1.id, "7".to_string());
-        assert_eq!(worker1.client_state, state1);
-        assert_eq!(worker1.opponent_word, None);
-        assert_eq!(worker2.id, "8".to_string());
-        assert_eq!(worker2.client_state, state2);
-        assert_eq!(worker2.opponent_word, Some("valid".to_string()));
-        
-        let lock = store.read().unwrap();
-        assert_eq!(lock.id_generator, 9);
-        assert_eq!(lock.available_clients.len(), 2);
-        assert_eq!(lock.available_clients["7"].0, state1);
-        assert_eq!(lock.available_clients["8"].0, state2);
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone())],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone())],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state1.clone(), None)),
+                                         Ok(("8", state2.clone(), Some("valid".to_string())))]);
+        assert_store_eq(store, (9, vec![("7", state1.clone()), ("8", state2.clone())]));
     }
     
-    // TODO: test can handle connection attempt busy
     #[test]
     fn test_rejects_connection_busy() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password", "password"]);
         
-        assert!(false);
+        // Execute
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
+        let r3 = handle_msg!(&mut workers[2], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("7".to_string(),
+                                                               "busy".to_string()))));
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        let state1 = ClientState::Riddlemaker("valid".to_string());
+        let state2 = ClientState::Guesser;
+        let state3 = ClientState::Free;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone())],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone())],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("9".to_string()),
+                                       Ptcl::OpponentConnectionNotEstablished("7".to_string())],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state1.clone(), None)),
+                                         Ok(("8", state2.clone(), Some("valid".to_string()))),
+                                         Ok(("9", state3.clone(), None)),]);
+        assert_store_eq(store, (10, vec![("7", state1.clone()), ("8", state2.clone()),
+                                         ("9", state3.clone())]));
     }
     
-    // TODO: test can handle user disconnection during game
-    // TODO: test can handle guess attempt
-    // TODO: test can handle hints
-    // TODO: test can handle word found
-    // TODO: test can handle connection after a game ended
+    #[test]
+    fn test_handles_opponent_disconnection() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password"]);
+        
+        // Execute
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
+        let r3 = handle_msg!(&mut workers[1], IMsg::Error);
+        let msg4 = workers[0].worker_rx.recv().unwrap();
+        let r4 = handle_msg!(&mut workers[0], msg4);
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        let state1 = ClientState::Riddlemaker("valid".to_string());
+        let state2 = ClientState::Guesser;
+        let state3 = ClientState::Free;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Err(()));
+        assert_eq!(r4, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone()),
+                                       Ptcl::ServerOpponentDisconnected],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone())],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state3.clone(), None)),
+                                         Ok(("8", state2.clone(), Some("valid".to_string()))),]);
+        assert_store_eq(store.clone(), (9, vec![("7", state3.clone()), ("8", state2.clone()),]));
+        
+        // Simulate worker[1] destruction after task terminates
+        workers[1].worker = Err(());
+        
+        // Test
+        assert_workers_eq(&workers, vec![Ok(("7", state3.clone(), None)),
+                                         Err(()),]);
+        assert_store_eq(store, (9, vec![("7", state3.clone()), ]));
+    }
+    
+    #[test]
+    fn test_handles_hint() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password"]);
+        
+        // Execute
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
+        let r3 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientHint("correct".to_string()))));
+        let msg4 = workers[1].worker_rx.recv().unwrap();
+        let r4 = handle_msg!(&mut workers[1], msg4);
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        let state1 = ClientState::Riddlemaker("valid".to_string());
+        let state2 = ClientState::Guesser;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Ok(()));
+        assert_eq!(r4, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone()),],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone()),
+                                       Ptcl::ClientHint("correct".to_string())],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state1.clone(), None)),
+                                         Ok(("8", state2.clone(), Some("valid".to_string()))),]);
+        assert_store_eq(store, (9, vec![("7", state1.clone()), ("8", state2.clone()),]));
+    }
+    
+    #[test]
+    fn test_handles_incorrect_guess() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password"]);
+        
+        // Execute
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
+        let r3 = handle_msg!(&mut workers[1], IMsg::Network(Ok(
+                                        Ptcl::ClientGuess("incorrect".to_string()))));
+        let msg4 = workers[0].worker_rx.recv().unwrap();
+        let r4 = handle_msg!(&mut workers[0], msg4);
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        let state1 = ClientState::Riddlemaker("valid".to_string());
+        let state2 = ClientState::Guesser;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Ok(()));
+        assert_eq!(r4, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone()),
+                                       Ptcl::ClientGuess("incorrect".to_string())],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone())],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state1.clone(), None)),
+                                         Ok(("8", state2.clone(), Some("valid".to_string()))),]);
+        assert_store_eq(store, (9, vec![("7", state1.clone()), ("8", state2.clone()),]));
+    }
+    
+    #[test]
+    fn test_handles_correct_guess() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password"]);
+        
+        // Execute
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
+        let r3 = handle_msg!(&mut workers[1], IMsg::Network(Ok(
+                                        Ptcl::ClientGuess("valid".to_string()))));
+        let msg4 = workers[0].worker_rx.recv().unwrap();
+        let r4 = handle_msg!(&mut workers[0], msg4);
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        let state1 = ClientState::Riddlemaker("valid".to_string());
+        let state2 = ClientState::Guesser;
+        let state3 = ClientState::Free;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Ok(()));
+        assert_eq!(r4, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone()),
+                                       Ptcl::ServerWordFound],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone()),
+                                       Ptcl::ServerWordFound],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state3.clone(), None)),
+                                         Ok(("8", state3.clone(), None)),]);
+        assert_store_eq(store, (9, vec![("7", state3.clone()), ("8", state3.clone()),]));
+    }
+    
+    #[test]
+    fn test_handles_riddlemaker_guess() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password"]);
+        
+        // Execute
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
+        let r3 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientGuess("valid".to_string()))));
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        let state1 = ClientState::Riddlemaker("valid".to_string());
+        let state2 = ClientState::Guesser;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone()),
+                                       Ptcl::LogicError],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone())],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state1.clone(), None)),
+                                         Ok(("8", state2.clone(), Some("valid".to_string()))),]);
+        assert_store_eq(store, (9, vec![("7", state1.clone()), ("8", state2.clone()),]));
+    }
+    
+    #[test]
+    fn test_handles_connection_after_game_ends() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password"]);
+        
+        // Execute
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
+        let r3 = handle_msg!(&mut workers[1], IMsg::Network(Ok(
+                                        Ptcl::ClientGuess("valid".to_string()))));
+        let msg4 = workers[0].worker_rx.recv().unwrap();
+        let r4 = handle_msg!(&mut workers[0], msg4);
+        let r5 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg6 = workers[1].worker_rx.recv().unwrap();
+        let r6 = handle_msg!(&mut workers[1], msg6);
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        let state1 = ClientState::Riddlemaker("valid".to_string());
+        let state2 = ClientState::Guesser;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Ok(()));
+        assert_eq!(r4, Ok(()));
+        assert_eq!(r5, Ok(()));
+        assert_eq!(r6, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone()),
+                                       Ptcl::ServerWordFound,
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone())],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone()),
+                                       Ptcl::ServerWordFound,
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone()),],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state1.clone(), None)),
+                                         Ok(("8", state2.clone(), Some("valid".to_string()))),]);
+        assert_store_eq(store, (9, vec![("7", state1.clone()), ("8", state2.clone()),]));
+    }
+    
+    #[test]
+    fn test_handles_connection_before_game_ends() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password", "password", "password"]);
+        
+        // Execute
+        let r1 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("8".to_string(),
+                                                               "valid".to_string()))));
+        let msg2 = workers[1].worker_rx.recv().unwrap();
+        let r2 = handle_msg!(&mut workers[1], msg2);
+        let r3 = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientSelectOpponent("9".to_string(),
+                                                               "valid".to_string()))));
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        let state1 = ClientState::Riddlemaker("valid".to_string());
+        let state2 = ClientState::Guesser;
+        let state3 = ClientState::Free;
+        assert_eq!(r1, Ok(()));
+        assert_eq!(r2, Ok(()));
+        assert_eq!(r3, Ok(()));
+        //assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("8".to_string(), state1.clone()),
+                                       Ptcl::LogicError],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("8".to_string()),
+                                       Ptcl::OpponentConnectionEstablished("7".to_string(), state2.clone()),],
+                                  vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("9".to_string()),],]);
+        assert_workers_eq(&workers, vec![Ok(("7", state1.clone(), None)),
+                                         Ok(("8", state2.clone(), Some("valid".to_string()))),
+                                         Ok(("9", state3.clone(), None))]);
+        assert_store_eq(store, (10, vec![("7", state1.clone()), ("8", state2.clone()),
+                                         ("9", state3.clone()),]));
+    }
+    
+    #[test]
+    fn test_handles_guess_without_opponent() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password"]);
+        
+        // Execute
+        let r = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientGuess("alone".to_string()))));
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        assert_eq!(r, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::LogicError]]);
+        assert_workers_eq(&workers, vec![Ok(("7", ClientState::Free, None))]);
+        assert_store_eq(store, (8, vec![("7", ClientState::Free)]));
+    }
+    
+    #[test]
+    fn test_handles_hint_without_opponent() {
+        // Prepare
+        let (store, mut workers) = initialize!("password", 7, vec!["password"]);
+        
+        // Execute
+        let r = handle_msg!(&mut workers[0], IMsg::Network(Ok(
+                                        Ptcl::ClientHint("alone".to_string()))));
+        
+        // Drain communication queues
+        let messages: Vec<Vec<Ptcl>> = drain_queues!(&mut workers);
+        
+        // Test
+        assert_eq!(r, Ok(()));
+        assert_queues_empty!(&workers);
+        assert_eq!(messages, vec![vec![Ptcl::ServerHello,
+                                       Ptcl::ConnectionEstablished("7".to_string()),
+                                       Ptcl::LogicError]]);
+        assert_workers_eq(&workers, vec![Ok(("7", ClientState::Free, None))]);
+        assert_store_eq(store, (8, vec![("7", ClientState::Free)]));
+    }
     
 }
