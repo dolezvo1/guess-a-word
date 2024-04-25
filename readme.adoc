@@ -5,8 +5,31 @@ Implementation of "Guess a word" client and server in Rust.
 
 == Setup
 
-. Get Cargo
-. Run command below according to whether you want to run the server or a client.
+. Install Rust and Cargo. On fresh Ubuntu install this can be done by running the following commands:
++
+----
+sudo apt update && sudo apt upgrade && sudo apt install curl
+sudo apt install build-essential
+curl https://sh.rustup.rs -sSf | sh
+----
++
+When prompted for installation options, continue with defaults, which should look like this:
++
+----
+ default host triple: x86_64-unknown-linux-gnu
+   default toolchain: stable (default)
+             profile: default
+modify PATH variable: yes
+----
++
+If installation went successfully, you should see the following line:
++
+----
+Rust is installed now. Great!
+----
++
+Now, restart your terminal (to make sure PATH variable is up to date).
+. Navigate to the repo root (directory containing this file) in your terminal and run command below according to whether you want to run the server or a client (or both).
 
 == Executables
 

@@ -4,6 +4,9 @@ use std::net::TcpStream;
 use std::net::SocketAddr;
 use std::sync::mpsc;
 
+#[cfg(target_family="unix")]
+use std::os::unix::net::UnixStream;
+
 mod protocol;
 mod client_worker;
 mod util;
@@ -41,7 +44,7 @@ async fn main() {
             tcp_stream.and_then(|stream|
                 stream.try_clone()
                       .map_err(|_| "TCP stream could not be cloned")
-                      .and_then(|clone| comm((Box::new(stream), Box::new(clone))))
+                      .and_then(|clone| comm(Box::new(stream), Box::new(clone)))
             )
         },
         
@@ -68,7 +71,7 @@ async fn main() {
 }
 
 // Communicate with server using provided streams
-fn comm<R, W>((mut server_r, mut server_w): (Box<R>, Box<W>)) -> Result<(), &'static str>
+fn comm<R, W>(mut server_r: Box<R>, mut server_w: Box<W>) -> Result<(), &'static str>
     where R: ProtocolReader<Ptcl> + Send + 'static,
           W: ProtocolWriter<Ptcl> + Send
 {

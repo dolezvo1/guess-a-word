@@ -62,10 +62,8 @@ async fn main() -> std::io::Result<()> {
     // Create TCP listener thread that sends client stream down the channel
     if let Some(tcp_port) = tcp_port {
         tokio::spawn(async move {
-            let tcp_listener = match TcpListener::bind(("127.0.0.1", tcp_port)) {
-                Ok(tcp_listener) => tcp_listener,
-                _ => { return; }
-            };
+            let tcp_listener = TcpListener::bind(("127.0.0.1", tcp_port))
+            	.expect("TCP listener could not be started");
             
             for stream in tcp_listener.incoming() {
                 let _ = stream.map(|stream| stream.try_clone().map(|clone| {
@@ -81,24 +79,20 @@ async fn main() -> std::io::Result<()> {
     if let Some(unix_socket_path) = unix_socket_path {
         tokio::spawn(async move {
             // Clean up the socket if it already exists
-            if std::fs::metadata(unix_socket_path).is_ok() {
-                std::fs::remove_file(unix_socket_path)?;
+            if std::fs::metadata(&unix_socket_path).is_ok() {
+                std::fs::remove_file(&unix_socket_path)
+                	.expect("Unix Socket already exists and could not be cleaned up");
             }
 
             // Create a Unix listener on the socket path
-            let listener = UnixListener::bind(unix_socket_path)?;
-            println!("Server is running on {}", unix_socket_path);
+            let listener = UnixListener::bind(&unix_socket_path)
+            			.expect("Unix Socket listener could not be started");
             
             // Loop over incoming connections
             for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        tx_unix_socket.send(2);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to connect: {}", e);
-                    }
-                }
+            	let _ = stream.map(|stream| stream.try_clone().map(|clone| {
+                    let _ = tx_unix_socket.send((Box::new(stream), Box::new(clone)));
+                }));
             }
             unreachable!();
         });
