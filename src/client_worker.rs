@@ -2,7 +2,8 @@
 use std::io::Write;
 
 use crate::protocol::{ClientState, GuessProtocol as Ptcl, ProtocolReader, ProtocolWriter};
-use crate::client_util::{prompted_input, ClientInternalMessage as IMsg};
+use crate::util::InternalMessage as IMsg;
+use crate::client_util::{prompted_input};
 
 /// Client-side representation of client state
 pub struct ClientWorker {
@@ -96,7 +97,6 @@ impl ClientWorker {
                     self.reset_state();
                 },
                 a => println!("{:?}", a),
-                // You were connected to [id] as a [role]
             },
             // Handle keyboard input
             IMsg::StdIn(input) => match &self.client_state {
@@ -110,6 +110,7 @@ impl ClientWorker {
                 ClientState::Riddlemaker(_) => { let _ = server_w.write(&Ptcl::ClientHint(input)); },
                 ClientState::Guesser => { let _ = server_w.write(&Ptcl::ClientGuess(input)); }
             },
+            _ => {},
         }
         Ok(())
     }

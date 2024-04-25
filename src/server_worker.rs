@@ -1,6 +1,6 @@
 
 use crate::protocol::{ClientState, GuessProtocol as Ptcl, ProtocolReader, ProtocolWriter};
-use crate::server_util::{ServerInternalMessage as IMsg};
+use crate::util::{InternalMessage as IMsg};
 use crate::{Sender, Store};
 
 /// Server-side representation of a client.

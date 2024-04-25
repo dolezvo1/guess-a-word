@@ -10,12 +10,10 @@ use std::os::unix::net::UnixListener;
 mod protocol;
 mod server_worker;
 mod util;
-mod server_util;
 
 use crate::protocol::{ClientState, GuessProtocol as Ptcl, ProtocolReader, ProtocolWriter};
 use crate::server_worker::ServerWorker;
-use crate::util::parse_arg;
-use crate::server_util::{ServerInternalMessage as IMsg};
+use crate::util::{parse_arg, spawn_network_listener, InternalMessage as IMsg};
 
 pub type Sender = mpsc::Sender<IMsg<Ptcl>>;
 pub struct ServerState {
@@ -112,7 +110,7 @@ async fn main() -> std::io::Result<()> {
                                             (client.0.as_mut(), client.1.as_mut()),
                                             password, store, tx.clone()) {
                     // Add network listener to the joint channel
-                    let _ = IMsg::<Ptcl>::spawn_network_listener(client.0, tx.clone());
+                    let _ = spawn_network_listener(client.0, tx.clone());
                     
                     // "At this moment, the server answers to any requests the client sends to the server. For unknown requests, the server must respond as well, such that client can identify it as an error."
                     while let Ok(msg) = joint_rx.recv() {

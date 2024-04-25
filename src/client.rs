@@ -14,8 +14,8 @@ mod client_util;
 
 use crate::protocol::{GuessProtocol as Ptcl, ProtocolReader, ProtocolWriter};
 use crate::client_worker::ClientWorker;
-use crate::util::parse_arg;
-use crate::client_util::{spawn_stdin_listener, ClientInternalMessage as IMsg};
+use crate::util::{parse_arg, spawn_network_listener, InternalMessage as IMsg};
+use crate::client_util::{spawn_stdin_listener};
 
 
 static ACCEPTED_OPTIONS: [&str; 2] = [
@@ -84,7 +84,7 @@ fn comm<R, W>(mut server_r: Box<R>, mut server_w: Box<W>) -> Result<(), &'static
     println!("Available commands:\n\tlist - List available opponents\n\tconnect ID WORD - Connect to an opponent");
     
     // Add network listener to the joint channel
-    let _ = IMsg::<Ptcl>::spawn_network_listener(server_r, tx.clone());
+    let _ = spawn_network_listener(server_r, tx.clone());
     let _ = spawn_stdin_listener(tx.clone());
     
     // Handle all messages in the joint channel until error

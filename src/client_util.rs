@@ -1,25 +1,11 @@
 
 use std::sync::mpsc::Sender;
-use serde::Deserialize;
 use tokio::task::{spawn_blocking, JoinHandle};
-use bincode::ErrorKind;
 
-use crate::protocol::ProtocolReader;
-use crate::util::{impl_spawn_network_listener};
-
-/// Internal message type - type of messages flowing between threads on client machine
-pub enum ClientInternalMessage<T> {
-    Network(Result<T,()>),
-    StdIn(String),
-    Error,
-}
-
-impl<T> ClientInternalMessage<T> {
-    impl_spawn_network_listener!(pub);
-}
+use crate::util::InternalMessage;
 
 /// Spawn a task to block on stdin read
-pub fn spawn_stdin_listener<T>(transmitter: Sender<ClientInternalMessage<T>>) -> JoinHandle<()>
+pub fn spawn_stdin_listener<T>(transmitter: Sender<InternalMessage<T>>) -> JoinHandle<()>
     where T: Send + 'static
 {
     spawn_blocking(move || { loop {
@@ -27,7 +13,7 @@ pub fn spawn_stdin_listener<T>(transmitter: Sender<ClientInternalMessage<T>>) ->
         std::io::stdin().read_line(&mut buffer).unwrap();
         buffer = buffer.strip_suffix(if cfg!(windows) {"\r\n"} else {"\n"})
                        .unwrap().to_string();
-        if transmitter.send(ClientInternalMessage::StdIn(buffer)).is_err() {
+        if transmitter.send(InternalMessage::StdIn(buffer)).is_err() {
             break
         }
     }})

@@ -1,4 +1,11 @@
 
+use std::sync::mpsc::Sender;
+use serde::Deserialize;
+use tokio::task::{spawn_blocking, JoinHandle};
+use bincode::ErrorKind;
+
+use crate::protocol::ProtocolReader;
+
 /// Find named argument, parse it to T
 pub fn parse_arg<T: std::str::FromStr>(
     name: &str,
@@ -16,14 +23,26 @@ pub fn parse_arg<T: std::str::FromStr>(
     None
 }
 
-/// Macro to generate associated function to spawn a task to block on network reader read
-/// Sends Self::Network(Ok(a)) when message is read,
-///       Self::Network(Err(())) when message deserialization fails,
-///   and Self::Error on unrecoverable error (such as lost connection).
-macro_rules! impl_spawn_network_listener {($vis: vis) => {
-$vis fn spawn_network_listener<R>(
+/// Internal message type - type of messages flowing between threads on server machine
+#[allow(dead_code)]
+pub enum InternalMessage<T> {
+    Network(Result<T,()>),
+    Opponent(T),
+    OpponentAssigned(/*tx: */Sender<InternalMessage<T>>,
+                     /*id:*/String, /*word: */String),
+    WordFound,
+    OpponentDisconnected,
+    StdIn(String),
+    Error,
+}
+
+/// Spawn a task to block on network reader read
+/// Sends InternalMessage::Network(Ok(a)) when message is read,
+///       InternalMessage::Network(Err(())) when message deserialization fails,
+///   and InternalMessage::Error on unrecoverable error (such as lost connection).
+pub fn spawn_network_listener<R, T>(
     mut reader: Box<R>,
-    transmitter: Sender<Self>,
+    transmitter: Sender<InternalMessage<T>>,
 ) -> JoinHandle<()>
     where R: ProtocolReader<T> + Send + ?Sized + 'static,
           T: for<'a> Deserialize<'a> + Send + 'static
@@ -31,22 +50,20 @@ $vis fn spawn_network_listener<R>(
     spawn_blocking(move || { loop {
         match reader.as_mut().read() {
             Ok(a) => {
-                transmitter.send(Self::Network(Ok(a))).unwrap();
+                transmitter.send(InternalMessage::Network(Ok(a))).unwrap();
             },
             Err(e) => match *e {
                 ErrorKind::Io(_) => {
-                    transmitter.send(Self::Error).unwrap();
+                    transmitter.send(InternalMessage::Error).unwrap();
                     break;
                 },
                 _ => {
-                    transmitter.send(Self::Network(Err(()))).unwrap();
+                    transmitter.send(InternalMessage::Network(Err(()))).unwrap();
                 },
             }
         }
     }})
 }
-}}
-pub(crate) use impl_spawn_network_listener;
 
 
 #[cfg(test)]
