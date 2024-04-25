@@ -74,3 +74,25 @@ impl<T, U> ProtocolWriter<T> for U
         bincode::serialize_into(self, element)
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use crate::Ptcl;
+    
+    #[test]
+    fn test_is_generally_shorter_than_json() {
+        // Prepare
+        let mut dest = VecDeque::<u8>::new();
+        
+        // Execute
+        let _ = ProtocolWriter::write(&mut dest, &Ptcl::ClientListOpponents);
+        
+        // Test
+        assert!(dest.len() < r#"{"type": "list_opponents"}"#.len());
+        assert!(dest.len() < r#"{"t":"l"}"#.len());
+        assert!(dest.len() <= r#"[14]"#.len());
+    }
+}
